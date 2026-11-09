@@ -418,32 +418,6 @@
         </div>
         <p class="text-[10px] text-slate-500 text-center mt-4">Tip: do not forward the OTP to anyone or through Telegram chat — Telegram will cancel it.</p>
     </div>
-    <!-- 📦 Orders worker WhatsApp number -->
-    <div class="card p-6 rounded-2xl">
-        <h3 class="text-base font-bold text-amber-400 mb-1 text-center">WhatsApp Orders (Selected Number)</h3>
-        <p class="text-[11px] text-slate-400 text-center mb-3">Customer orders queue on this server and go out one at a time from this number to the third-party service below. Its reply updates the order status here.</p>
-        <div class="max-w-md mx-auto space-y-3">
-            <div>
-                <label class="block text-[10px] text-slate-400 mb-1 text-center">Third-party service's WhatsApp number (country code ke saath)</label>
-                <div class="flex gap-2">
-                    <input type="tel" id="ordwaTarget" class="flex-1 p-3 rounded-xl bg-slate-900 border border-slate-700 text-xs text-amber-200 text-center" placeholder="e.g. 919876543210">
-                    <button onclick="ordwaSaveTarget()" class="px-4 py-2 bg-amber-600 hover:bg-amber-500 text-white font-bold rounded-xl text-xs">SAVE</button>
-                </div>
-            </div>
-            <p id="ordwa-status" class="text-xs text-slate-400 text-center">Loading...</p>
-            <div id="ordwa-qr-box" class="hidden text-center">
-                <div class="bg-white p-2 rounded-xl inline-block"><img id="ordwa-qr-img" class="w-56 h-56" alt="QR"></div>
-                <p class="text-[11px] text-slate-400 mt-2">Phone me WhatsApp kholein &rarr; Settings &rarr; Linked devices &rarr; Link a device &rarr; is QR ko scan karein.</p>
-            </div>
-            <p id="ordwa-err" class="text-[11px] text-amber-400 text-center"></p>
-            <button id="ordwaConnectBtn" onclick="ordwaConnect()" class="w-full py-3 bg-emerald-600 hover:bg-emerald-500 text-white font-extrabold rounded-xl text-xs">CONNECT / SHOW QR</button>
-            <div id="ordwa-connected-box" class="hidden space-y-2">
-                <input type="tel" id="ordwaTestTo" class="w-full p-3 rounded-xl bg-slate-900 border border-slate-700 text-xs text-indigo-200 text-center" placeholder="Test number e.g. 919876543210">
-                <button onclick="ordwaTest()" class="w-full py-2 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded-xl text-xs">SEND TEST MESSAGE</button>
-                <button onclick="ordwaLogout()" class="w-full py-2 bg-rose-700 hover:bg-rose-600 text-white font-bold rounded-xl text-xs">UNLINK THIS WHATSAPP</button>
-            </div>
-        </div>
-    </div>
 </section>
 <section data-tab="selected" class="hidden space-y-4">
     <div class="card p-4 space-y-3">
@@ -723,7 +697,6 @@
             loadMaintenance();
             startTestLabPolling();
             waRefresh(); setInterval(() => { if (!document.hidden) waRefresh(); }, 3000); secLoad();
-            ordwaRefresh(); setInterval(() => { if (!document.hidden) ordwaRefresh(); }, 3000);
             tgRefreshStatus();
             setInterval(tgRefreshStatus, 10000);
             setInterval(loadAdminData, 15000); // 🔄 Auto-refresh orders/users every 15s
@@ -854,44 +827,6 @@
         const to = document.getElementById('waTestTo').value.trim();
         if (!to) return alert('Number daalein.');
         try { const d = await tlPost('/api/admin/wa/test-message', { to, text: '🧪 Test message from JPW Admin Panel.' }); alert(d.message || 'Done'); } catch(e) { alert('Network error: ' + e.message); }
-    }
-
-    // 📦 Orders worker WhatsApp number
-    async function ordwaRefresh() {
-        const st = document.getElementById('ordwa-status');
-        try {
-            const d = await (await fetch('/api/admin/ordwa/status', { headers: { 'x-admin-pass': adminPassCache }, cache: 'no-store' })).json();
-            if (!d.success) throw new Error(d.message || 'Failed');
-            st.innerText = (WA_LABELS[d.state] || d.state) + (d.account ? ' | +' + d.account.number + (d.account.name ? ' (' + d.account.name + ')' : '') : '');
-            const qrBox = document.getElementById('ordwa-qr-box');
-            if (d.qr) { document.getElementById('ordwa-qr-img').src = d.qr; qrBox.classList.remove('hidden'); } else { qrBox.classList.add('hidden'); }
-            document.getElementById('ordwa-err').innerText = d.lastError || '';
-            const connected = d.state === 'connected';
-            document.getElementById('ordwa-connected-box').classList.toggle('hidden', !connected);
-            document.getElementById('ordwaConnectBtn').classList.toggle('hidden', connected || d.state === 'unavailable');
-            const targetInput = document.getElementById('ordwaTarget');
-            if (document.activeElement !== targetInput) targetInput.value = d.targetNumber || '';
-        } catch(e) { st.innerText = 'Could not load: ' + e.message; }
-    }
-    async function ordwaConnect() {
-        const btn = document.getElementById('ordwaConnectBtn'); btn.disabled = true;
-        try { const d = await tlPost('/api/admin/ordwa/connect'); if (!d.success) alert(d.message || 'Failed'); } catch(e) { alert('Network error: ' + e.message); }
-        finally { btn.disabled = false; ordwaRefresh(); }
-    }
-    async function ordwaLogout() {
-        if (!confirm('WhatsApp unlink karein? Saved login delete ho jayega, dobara QR scan karna padega.')) return;
-        try { const d = await tlPost('/api/admin/ordwa/logout'); alert(d.message || 'Done'); } catch(e) { alert('Network error: ' + e.message); }
-        ordwaRefresh();
-    }
-    async function ordwaTest() {
-        const to = document.getElementById('ordwaTestTo').value.trim();
-        if (!to) return alert('Number daalein.');
-        try { const d = await tlPost('/api/admin/ordwa/test-message', { to }); alert(d.message || 'Done'); } catch(e) { alert('Network error: ' + e.message); }
-    }
-    async function ordwaSaveTarget() {
-        const targetNumber = document.getElementById('ordwaTarget').value.trim();
-        if (!targetNumber) return alert('Number daalein.');
-        try { const d = await tlPost('/api/admin/ordwa/target', { targetNumber }); alert(d.message || 'Done'); } catch(e) { alert('Network error: ' + e.message); }
     }
 
 

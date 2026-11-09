@@ -15,7 +15,6 @@ const { debugLog, getRecentLogs, getAllLogs, getLogFilePath } = require('./utils
 const { buildXlsx } = require('./utils/xlsx');
 const adsModule = require('./adsModule');
 const { startKeepAlive, keepAliveMiddleware, getPublicBase } = require('./utils/keepAlive');
-const { verifyLicenseKey } = require('./utils/license');
 
 process.on('uncaughtException', (err) => {
     debugLog('CrashGuard', 'Uncaught Exception:', err.message);
@@ -75,54 +74,6 @@ app.use((req, res, next) => {
 app.get('/api/maintenance-status', (req, res) => {
     res.set('Cache-Control', 'no-store');
     res.json({ success: true, enabled: maintenance.enabled, whatsapp: maintenance.whatsapp, since: maintenance.since });
-});
-
-// ================= 🔑 LICENSE / ACTIVATION =================
-// Set LICENSE_KEY in .env. Without a valid key, every route is blocked
-// except the health check and the license-status API. See utils/license.js.
-const LICENSE_KEY = process.env.LICENSE_KEY || '';
-const LICENSE_OPEN_PREFIXES = ['/health', '/api/license-status'];
-(function reportLicenseAtStartup() {
-    const startupCheck = verifyLicenseKey(LICENSE_KEY, null); // signature + expiry only at boot
-    if (startupCheck.valid) {
-        debugLog('License', `Licensed to "${startupCheck.payload.c}" (domain: ${startupCheck.payload.d}).`);
-    } else {
-        debugLog('License', `NOT LICENSED — ${startupCheck.reason}`);
-    }
-})();
-function licenseBlockedHtml(reason) {
-    return `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Not Licensed</title>
-<style>*{box-sizing:border-box}body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px;font-family:'Segoe UI',Tahoma,Verdana,sans-serif;background:linear-gradient(135deg,#0f172a 0%,#1e1b4b 50%,#311042 100%);color:#f8fafc;text-align:center}
-.card{max-width:420px;width:100%;background:rgba(15,23,42,.85);border:1px solid rgba(248,113,113,.45);border-radius:24px;padding:32px 24px;box-shadow:0 0 40px rgba(248,113,113,.2)}
-.ico{font-size:56px;margin-bottom:8px}h1{font-size:20px;margin:0 0 12px;color:#fbbf24;text-transform:uppercase;letter-spacing:1px}p{font-size:14px;line-height:1.6;color:#cbd5e1;margin:0 0 10px}
-small{display:block;margin-top:16px;color:#64748b;font-size:11px}</style></head>
-<body><div class="card"><div class="ico">🔑</div><h1>Not Licensed</h1>
-<p>${reason}</p><p>यह सर्वर एक्टिवेट नहीं है। कृपया सही LICENSE_KEY डालें।</p>
-<small>Contact the person you purchased this from for a valid license key.</small></div></body></html>`;
-}
-app.use((req, res, next) => {
-    const liveCheck = verifyLicenseKey(LICENSE_KEY, req.hostname);
-    if (liveCheck.valid) return next();
-    const p = req.path;
-    if (LICENSE_OPEN_PREFIXES.some(x => p === x || p.startsWith(x + '/'))) return next();
-    res.set({ 'Cache-Control': 'no-store', 'X-License': '0' });
-    if (p.startsWith('/api/')) {
-        return res.status(403).json({ success: false, license: false, message: liveCheck.reason });
-    }
-    return res.status(403).type('html').send(licenseBlockedHtml(liveCheck.reason));
-});
-app.get('/api/license-status', (req, res) => {
-    res.set('Cache-Control', 'no-store');
-    const s = verifyLicenseKey(LICENSE_KEY, req.hostname);
-    res.json({
-        success: true,
-        licensed: s.valid,
-        customer: s.payload?.c || null,
-        domain: s.payload?.d || null,
-        expiresAt: s.payload?.exp || 0,
-        reason: s.valid ? null : s.reason,
-    });
 });
 
 app.use(express.static(path.join(__dirname, 'public')));
@@ -1267,7 +1218,7 @@ async function onMongoConnected() {
     try { await loadServiceHours(); } catch (e) { debugLog('Server', 'loadServiceHours:', e.message); }
     try { await loadSheetUrl(); } catch (e) { debugLog('Server', 'loadSheetUrl:', e.message); }
     try { await OfferModel.updateMany({ 'delivery.status': 'sending' }, { $set: { 'delivery.status': 'interrupted', 'delivery.note': 'Server restart hua - "Send remaining" dabakar baaki logon ko bhej sakte hain.' } }); } catch (e) {}
-    const steps = [loadMaintenance, initAllBots, startEmbeddedBot, initUserbotBridge, startSmartGreetingsTimer, startPackageExpiryTimer, startOrderTimeoutSweeper, () => wa.autoStart(), reloadSelected, () => waSel.autoStart(), () => waOrders.autoStart(), startWaOrderQueueSweeper];
+    const steps = [loadMaintenance, initAllBots, startEmbeddedBot, initUserbotBridge, startSmartGreetingsTimer, startPackageExpiryTimer, startOrderTimeoutSweeper, () => wa.autoStart(), reloadSelected, () => waSel.autoStart()];
     for (const step of steps) {
         try { await step(); } catch (e) { debugLog('Server', `startup step ${step.name} failed:`, e.message); }
     }
@@ -1342,8 +1293,6 @@ const orderSchema = new mongoose.Schema({
     isPriority: { type: Boolean, default: false },
     isTest: { type: Boolean, default: false },   // placed from the Admin Panel Test Lab (no coin, no customer message)
     botMsgId: { type: String, default: '' },     // id of the third-party bot's reply message for this order (the bot EDITS that same message)
-    waSentAt: { type: Date, default: null },      // when this order was forwarded to the orders-worker WhatsApp number (server queue)
-    waFirstReplyAt: { type: Date, default: null }, // when the worker number's first reply for this order arrived (unblocks the next queued order)
     createdAt: { type: Date, default: Date.now }
 }, { timestamps: { createdAt: false, updatedAt: true } });   // updatedAt = when the status / customer message last changed
 
@@ -1459,11 +1408,6 @@ const wa = require('./whatsapp')({ mongoose, debugLog });
 // fixed amount for the whole day. Everything about them is managed from the Admin Panel > Selected tab only.
 // They use their own WhatsApp number (waSel) for reports and payment messages.
 const waSel = require('./whatsapp')({ mongoose, debugLog, name: 'sel', label: 'WhatsApp-Selected' });
-// ================= 📦 ORDERS WORKER NUMBER =================
-// Replaces the old Telegram-userbot relay (forwardOrderToTargetBot / TARGET_THIRD_PARTY_BOT) for sending
-// orders to the third-party reach service. This number forwards orders ONE AT A TIME (server-side queue:
-// see scheduleWaOrderQueue below) and its target number is set from the Admin Panel, not an env var.
-const waOrders = require('./whatsapp')({ mongoose, debugLog, name: 'ord', label: 'WhatsApp-Orders' });
 const selectedSchema = new mongoose.Schema({
     telegramChatId: { type: String, required: true, unique: true },
     customId: { type: String, default: '' },
@@ -1624,38 +1568,6 @@ app.post('/api/admin/selwa/test-message', requireAdminAuth, async (req, res) => 
         await waSel.sendText(req.body?.to, '🧪 Test message from JPW Admin Panel (selected-users number).');
         res.json({ success: true, message: '✅ Message sent.' });
     } catch (err) { res.json({ success: false, message: err.message }); }
-});
-
-// ---- the separate WhatsApp number used to forward orders to the third-party service (replaces Telegram userbot) ----
-app.get('/api/admin/ordwa/status', requireAdminAuth, async (req, res) => {
-    res.set('Cache-Control', 'no-store');
-    res.json({ success: true, ...waOrders.getStatus(), targetNumber: await getSettingValue('wa_orders_target_number') });
-});
-app.post('/api/admin/ordwa/connect', requireAdminAuth, async (req, res) => {
-    try {
-        if (waOrders.getStatus().state === 'connected') return res.json({ success: true, message: 'Already connected.' });
-        await waOrders.start();
-        res.json({ success: true, message: 'Starting... QR will appear in a few seconds.' });
-    } catch (err) { res.status(500).json({ success: false, message: err.message }); }
-});
-app.post('/api/admin/ordwa/logout', requireAdminAuth, async (req, res) => {
-    try { await waOrders.logout(); res.json({ success: true, message: 'Disconnected and the saved session was deleted.' }); }
-    catch (err) { res.status(500).json({ success: false, message: err.message }); }
-});
-app.post('/api/admin/ordwa/test-message', requireAdminAuth, async (req, res) => {
-    try {
-        await waOrders.sendText(req.body?.to, '🧪 Test message from JPW Admin Panel (orders-worker number).');
-        res.json({ success: true, message: '✅ Message sent.' });
-    } catch (err) { res.json({ success: false, message: err.message }); }
-});
-// The WhatsApp number orders are forwarded to (the third-party reach service's number). Admin-Panel only, no env var.
-app.post('/api/admin/ordwa/target', requireAdminAuth, async (req, res) => {
-    try {
-        const digits = String(req.body?.targetNumber || '').replace(/\D/g, '');
-        if (digits.length < 8 || digits.length > 15) return res.json({ success: false, message: 'Enter a valid number with country code (e.g. 919876543210).' });
-        await setSettingValue('wa_orders_target_number', digits);
-        res.json({ success: true, message: '✅ Orders will now be forwarded to +' + digits + '.' });
-    } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 });
 
 // ================= 💳 SELECTED USERS: nightly bill (10 PM lock -> QR -> pay by 1 AM) =================
@@ -3907,154 +3819,6 @@ async function findRunningOrderForId(targetId) {
     return OrderModel.findOne({ targetId: { $regex: '^' + escapeRegex(String(targetId).trim()) + '$', $options: 'i' }, status: { $in: ACTIVE_ORDER_STATUSES } }).select('_id telegramChatId isTest').lean();
 }
 const ALREADY_IN_SERVER_MSG = '⚠️ Already in server: an order for this ID is already running. Please wait until it is completed. Nothing was charged for this request.';
-
-// ================= 📦 ORDERS QUEUE (server-side, WhatsApp worker) =================
-// Replaces the old Telegram userbot relay. Orders sit in Mongo with status 'Pending' until this picks them
-// up. Only ONE order is ever "sent but no reply yet" at a time — the next one is sent only after the
-// worker number's FIRST reply for the current order arrives (see waOrders.onMessage below).
-let waOrderQueueBusy = false;
-async function scheduleWaOrderQueue() {
-    if (waOrderQueueBusy) return;
-    waOrderQueueBusy = true;
-    try {
-        for (;;) {
-            if (mongoose.connection.readyState !== 1) break;
-            const waiting = await OrderModel.exists({ status: { $in: ACTIVE_ORDER_STATUSES }, waSentAt: { $ne: null }, waFirstReplyAt: null });
-            if (waiting) break; // something is already sent and we're waiting on its first reply - don't send another
-            const next = await OrderModel.findOne({ status: { $in: ACTIVE_ORDER_STATUSES }, waSentAt: null }).sort({ createdAt: 1 });
-            if (!next) break; // queue empty
-            const targetNumber = await getSettingValue('wa_orders_target_number');
-            if (!targetNumber) { debugLog('WaOrders', `Order ${next._id} is queued but no target number is set in Admin Panel yet.`); break; }
-            if (!waOrders.isConnected()) { debugLog('WaOrders', `Order ${next._id} is queued but the orders-worker WhatsApp is not connected.`); break; }
-            try {
-                const payload = `${String(next.targetId).trim()}\n${String(next.targetPass).trim()}`;
-                await waOrders.sendText(targetNumber, payload);
-                next.waSentAt = new Date();
-                if (next.status === 'Pending') next.adminReply = plainText(buildCustomerMessage('received', { targetId: next.targetId }));
-                await next.save();
-                pushBotLog({ dir: 'OUT', text: `Order sent via WhatsApp to +${targetNumber}\nTech ID: ${next.targetId}\nPassword: ${'*'.repeat(Math.min(String(next.targetPass).length, 8))}` });
-                break; // sent one - wait for its first reply before the loop sends the next
-            } catch (e) {
-                debugLog('WaOrders', `send failed for order ${next._id}:`, e.message);
-                const customerBot = CUSTOMER_BOT_TOKEN ? new TelegramBot(CUSTOMER_BOT_TOKEN, { polling: false }) : null;
-                await refundCoinTo(String(next.telegramChatId));
-                next.status = 'Rejected';
-                next.adminReply = '❌ Service unreachable (WhatsApp). 1 Coin refunded.';
-                await next.save();
-                sendLogToGoogleSheet({ logType: 'ORDER', type: 'REACH_ORDER_SUBMITTED', telegramChatId: String(next.telegramChatId), details: `Target ID: ${next.targetId} (WhatsApp send failed)`, status: 'Rejected' });
-                await sendCustomerMessage(customerBot, next.telegramChatId, next.adminReply);
-                // keep looping so a stuck order never blocks the rest of the queue
-            }
-        }
-    } catch (e) { debugLog('WaOrders', 'queue processor error:', e.message); }
-    finally { waOrderQueueBusy = false; }
-}
-// Safety net: covers a missed first reply, a reconnect, or the target number being set after orders
-// were already queued. cancelStaleOrders() (30 min timeout) still applies on top of this as before.
-function startWaOrderQueueSweeper() {
-    scheduleWaOrderQueue().catch(() => {});
-    setInterval(() => scheduleWaOrderQueue().catch(() => {}), 20 * 1000).unref();
-}
-
-// Classifies the worker number's reply text and updates the order (same status vocabulary the old
-// Telegram relay used, so the Admin Panel / customer messages need no changes elsewhere).
-async function applyWaOrderReply(order, rawText) {
-    const text = String(rawText || '').toLowerCase();
-    const customerBot = CUSTOMER_BOT_TOKEN ? new TelegramBot(CUSTOMER_BOT_TOKEN, { polling: false }) : null;
-    const adminBot = ADMIN_BOT_TOKEN ? new TelegramBot(ADMIN_BOT_TOKEN, { polling: false }) : null;
-    const isFinalSuccess = /status:\s*success\b/.test(text);
-    const workOrderMatch = String(rawText).match(/Work\s*Order\s*:\s*(\d{5,})/i);
-    if (workOrderMatch && (!order.workOrderId || order.workOrderId === 'N/A')) order.workOrderId = workOrderMatch[1];
-
-    if (isFinalSuccess) {
-        stopAutoRecheck(order._id);
-        order.status = 'Completed';
-        await order.save();
-        sendLogToGoogleSheet({ logType: 'ORDER', type: 'REACH_COMPLETED', telegramChatId: order.telegramChatId, details: `Target: ${order.targetId}, WorkOrder:${order.workOrderId}`, status: 'Completed' });
-        try {
-            const orderOwner = await UserModel.findOne({ telegramChatId: order.telegramChatId });
-            if (orderOwner && orderOwner.referredBy && orderOwner.referredBy !== 'ADMIN_DIRECT') {
-                const referrer = await UserModel.findOne({ referralCode: orderOwner.referredBy });
-                if (referrer) {
-                    let earnedComm = 5.00;
-                    if (orderOwner.lastPackageCoins === 3) earnedComm = 3.00;
-                    else if (orderOwner.lastPackageCoins === 7) earnedComm = 2.00;
-                    else if (orderOwner.lastPackageCoins === 15) earnedComm = 1.00;
-                    referrer.commissionBalance = (referrer.commissionBalance || 0) + earnedComm;
-                    await referrer.save();
-                }
-            }
-        } catch (err) { debugLog('WaOrders', 'Commission credit error:', err.message); }
-        const successExtras = await buildCustomerExtras(order.telegramChatId, rawText);
-        const successReply = buildCustomerMessage('success', { targetId: order.targetId, workOrderId: order.workOrderId, extras: successExtras });
-        order.adminReply = plainText(successReply);
-        await order.save();
-        await sendCustomerMessage(customerBot, order.telegramChatId, successReply);
-        if (adminBot) await adminBot.sendMessage(ADMIN_CHAT_ID, `🎉 **Order Complete & Commission Credited:** \`${order.targetId}\`\n\n${rawText}`, { parse_mode: 'Markdown' }).catch(() => {});
-    } else if (text.includes('locked') || text.includes('alert ls') || text.includes('account is locked') || text.includes('login failed') || text.includes('invalid credentials') || text.includes('reject') || text.includes('fail') || text.includes('error') || text.includes('status: fail') || text.includes('not verified') || text.includes('not reached') || text.includes('cancel')) {
-        stopAutoRecheck(order._id);
-        order.status = 'Rejected';
-        await order.save();
-        await refundCoinTo(order.telegramChatId);
-        const failKind = ['locked', 'alert ls', 'account is locked'].some(k => text.includes(k)) ? 'locked'
-            : ['login failed', 'invalid credentials'].some(k => text.includes(k)) ? 'credentials'
-            : ['not verified', 'not reached', 'status: fail'].some(k => text.includes(k)) ? 'verifyFailed'
-            : 'failed';
-        const failExtras = await buildCustomerExtras(order.telegramChatId, rawText);
-        const failReply = buildCustomerMessage(failKind, { targetId: order.targetId, workOrderId: order.workOrderId, extras: failExtras });
-        order.adminReply = plainText(failReply);
-        await order.save();
-        sendLogToGoogleSheet({ logType: 'ORDER', type: 'REACH_REJECTED', telegramChatId: order.telegramChatId, details: `Target: ${order.targetId} (Failed/Locked)`, status: 'Rejected' });
-        await sendCustomerMessage(customerBot, order.telegramChatId, failReply);
-        if (adminBot) await adminBot.sendMessage(ADMIN_CHAT_ID, `❌ **Order Rejected:** \`${order.targetId}\`\n\n${rawText}`, { parse_mode: 'Markdown' }).catch(() => {});
-    } else if (text.includes('security check') || text.includes('completed in') || text.includes('queued') || text.includes('queue:') || text.includes('starting reach') || text.includes('still reaching') || text.includes('processing your reach') || text.includes('processing reach') || text.includes('working on reach')) {
-        order.status = 'In Progress';
-        await order.save();
-        if (text.includes('completed in')) startAutoRecheck(order._id, order.targetId, order.targetPass);
-        const progKind = text.includes('completed in') ? 'verifying'
-            : text.includes('security check') ? 'checking'
-            : (text.includes('queued') || text.includes('queue:')) ? 'queued'
-            : (text.includes('processing your reach') || text.includes('processing reach')) ? 'received'
-            : 'working';
-        const progReply = buildCustomerMessage(progKind, { targetId: order.targetId, rawText });
-        order.adminReply = plainText(progReply);
-        await order.save();
-        await sendCustomerMessage(customerBot, order.telegramChatId, progReply);
-    } else {
-        if (order.status === 'Pending' || order.status === 'Accepted') order.status = 'In Progress';
-        const recvReply = buildCustomerMessage('received', { targetId: order.targetId });
-        order.adminReply = plainText(recvReply);
-        await order.save();
-        debugLog('WaOrders', `Unrecognized reply pattern for order ${order._id}: ${String(rawText).slice(0, 200)}`);
-    }
-}
-
-waOrders.onMessage(async ({ from, text }) => {
-    try {
-        if (mongoose.connection.readyState !== 1) return;
-        const rawText = String(text || '').trim();
-        if (!rawText) return;
-        const targetNumber = await getSettingValue('wa_orders_target_number');
-        if (targetNumber && String(from).replace(/\D/g, '') !== String(targetNumber).replace(/\D/g, '')) return; // not the worker number
-        const candidates = await OrderModel.find({ status: { $in: ACTIVE_ORDER_STATUSES }, waSentAt: { $ne: null } }).sort({ waSentAt: 1 });
-        if (candidates.length === 0) return;
-        const normId = v => String(v || '').replace(/[^0-9a-z]/gi, '').replace(/^0+/, '').toLowerCase();
-        let order = candidates.find(o => rawText.includes(o.targetId) || rawText.includes(o.targetPass));
-        if (!order) {
-            const techM = rawText.match(/Tech\s*ID\s*:\s*([A-Za-z0-9]+)/i);
-            const n = techM ? normId(techM[1]) : '';
-            if (n) order = candidates.find(o => normId(o.targetId) === n);
-        }
-        if (!order && candidates.length === 1) order = candidates[0];
-        if (!order) { debugLog('WaOrders', `Reply ignored: no matching active order. Text: ${rawText.slice(0, 150)}`); return; }
-
-        const isFirstReply = !order.waFirstReplyAt;
-        if (isFirstReply) { order.waFirstReplyAt = new Date(); await order.save(); }
-        pushBotLog({ dir: 'IN', text: rawText, note: `order ${order._id}` });
-        await applyWaOrderReply(order, rawText);
-        if (isFirstReply) scheduleWaOrderQueue(); // first reply received - safe to send the next queued order now
-    } catch (e) { debugLog('WaOrders', 'onMessage handler error:', e.message); }
-});
 // One place that places an order (used by the web/Telegram route below AND by the WhatsApp bot).
 // Returns the same object the route sends as JSON: { success, message, remainingCoins }.
 async function placeOrder({ telegramChatId, targetId, targetPass, isPriority }) {
@@ -4088,9 +3852,18 @@ async function placeOrder({ telegramChatId, targetId, targetPass, isPriority }) 
             status: 'Pending'
         });
 
-        // Orders no longer go out immediately: they sit as 'Pending' and the server-side queue
-        // (scheduleWaOrderQueue) forwards them to the orders-worker WhatsApp number one at a time.
-        scheduleWaOrderQueue().catch(e => debugLog('WaOrders', 'queue kick failed:', e.message));
+        const sent = await forwardOrderToTargetBot(cleanId, cleanPass);
+        if (!sent) {
+            await refundCoinTo(String(telegramChatId));
+            newOrder.status = 'Rejected';
+            newOrder.adminReply = '❌ Service unreachable. 1 Coin refunded.';
+            await newOrder.save();
+            if (selInfo) return { success: false, message: '⚠️ Service is not reachable right now. Please try again in a moment.', remainingCoins: user.jpwCoins, selected: true };
+            return { success: false, message: '⚠️ Bot unreachable. Coin refunded.', remainingCoins: round2(user.jpwCoins + 1) };
+        }
+        // 🔧 FIX: the order was handed to the service, so it must not keep showing "Pending".
+        // Only set this if no reply has already arrived and moved it further.
+        await OrderModel.updateOne({ _id: newOrder._id, status: 'Pending' }, { $set: { status: 'In Progress', adminReply: plainText(buildCustomerMessage('received', { targetId: cleanId })) } });
         return { success: true, message: 'Order submitted!', remainingCoins: user.jpwCoins, selected: !!selInfo };   // selected users never see coins
     } finally { if (lockKey) orderLocks.delete(lockKey); }
 }
